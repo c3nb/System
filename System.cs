@@ -699,7 +699,11 @@ namespace System
                     var paramType = param.ParameterType;
                     var name = param.Name;
                     if (privVars.TryGetValue(name, out int index))
-                        il.Emit(OpCodes.Ldarg, index);
+                    {
+                        if (paramType.IsByRef)
+                            il.Emit(OpCodes.Ldarga, index);
+                        else il.Emit(OpCodes.Ldarg, index);
+                    }
                     else if (name == option.Instance)
                     {
                         if (isStatic)
