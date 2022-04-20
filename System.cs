@@ -298,6 +298,30 @@ namespace System
         public WhileBuilder While(Action<ConditionBuilder> condition) => new WhileBuilder(this, condition);
         public DoWhileBuilder DoWhile(Action<ConditionBuilder> condition) => new DoWhileBuilder(this, condition);
         public ForBuilder For(int loopCount) => new ForBuilder(this, loopCount);
+        public void If(Action<ConditionBuilder> condition, Action<ILEmitter> action)
+        {
+            var @if = If(condition);
+            action(this);
+            @if.EndIf();
+        }
+        public void While(Action<ConditionBuilder> condition, Action<ILEmitter> action)
+        {
+            var @while = While(condition);
+            action(this);
+            @while.EndWhile();
+        }
+        public void DoWhile(Action<ConditionBuilder> condition, Action<ILEmitter> action)
+        {
+            var doWhile = DoWhile(condition);
+            action(this);
+            doWhile.EndDoWhile();
+        }
+        public void For(int loopCount, Action<ILEmitter, LocalBuilder> action)
+        {
+            var @for = For(loopCount);
+            action(this, @for.count);
+            @for.EndFor();
+        }
         #region ILEx
         public Label DefineLabel() => il.DefineLabel();
         public ILEmitter MarkLabel(Label label) { il.MarkLabel(label); return this; }
