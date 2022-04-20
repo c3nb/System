@@ -1,12 +1,550 @@
-﻿using System.Linq;
+using System.Linq;
 using System.Text;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 
 namespace System
 {
+    public class Variable
+    {
+        public readonly bool IsLocalVariable;
+        public readonly short Index;
+        public readonly object Value;
+        Variable(bool isLoc, short idx, object value = null)
+        {
+            IsLocalVariable = isLoc;
+            Index = idx;
+            Value = value;
+        }
+        public void Load(ILEmitter il)
+        {
+            if (Value != null)
+            {
+                if (Value is float f)
+                    il.Ldc_R4(f);
+                else if (Value is double d)
+                    il.Ldc_R8(d);
+                else if (Value is long l)
+                    il.Ldc_I8(l);
+                else if (Value is int i)
+                    il.Ldc_I4(i);
+                else throw new NotSupportedException($"{Value.GetType()} Is Not Supported!");
+                return;
+            }
+            if (IsLocalVariable)
+                il.Ldloc(Index);
+            else il.Ldarg(Index);
+        }
+        public static Variable GetVariable(bool value) => new Variable(false, -1, value ? 1 : 0);
+        public static Variable GetVariable(float value) => new Variable(false, -1, value);
+        public static Variable GetVariable(double value) => new Variable(false, -1, value);
+        public static Variable GetVariable(long value) => new Variable(false, -1, value);
+        public static Variable GetVariable(int value) => new Variable(false, -1, value);
+        public static Variable GetArgument(short index) => new Variable(false, index);
+        public static Variable GetLocalVar(short index) => new Variable(true, index);
+        public static Variable GetLocalVar(LocalBuilder loc) => GetLocalVar((short)loc.LocalIndex);
+        public static implicit operator Variable(bool value) => GetVariable(value);
+        public static implicit operator Variable(float value) => GetVariable(value);
+        public static implicit operator Variable(double value) => GetVariable(value);
+        public static implicit operator Variable(long value) => GetVariable(value);
+        public static implicit operator Variable(int value) => GetVariable(value);
+        public static implicit operator Variable(LocalBuilder loc) => GetLocalVar(loc);
+    }
+    public class ILEmitter
+    {
+        public class ConditionBlock
+        {
+            protected ConditionBlock(ILEmitter emitter) => this.emitter = emitter;
+            public Label endOfBlock { get; protected set; }
+            public Label outOfBlock { get; protected set; }
+            internal readonly ILEmitter emitter;
+            internal bool conditionIsSet;
+        }
+        public class ConditionBuilder
+        {
+            public readonly ConditionBlock conditionBlock;
+            internal readonly LocalBuilder condition;
+            readonly ILEmitter il;
+            bool and;
+            bool or;
+            public ConditionBuilder Load(Variable var)
+            {
+                if (var == null)
+                    throw new ArgumentNullException("Variable Cannot Be Null! (var)");
+                var.Load(il);
+                CheckAndOr();
+                return this;
+            }
+            public ConditionBuilder Equals(Variable a, Variable b)
+            {
+                CheckVariablesAreNull(a, b);
+                a.Load(il);
+                b.Load(il);
+                il.Ceq();
+                CheckAndOr();
+                return this;
+            }
+            public ConditionBuilder Inequals(Variable a, Variable b)
+            {
+                Equals(a, b);
+                il.Ldc_I4_0();
+                il.Ceq();
+                return this;
+            }
+            public ConditionBuilder GreaterThan(Variable a, Variable b)
+            {
+                CheckVariablesAreNull(a, b);
+                a.Load(il);
+                b.Load(il);
+                il.Cgt();
+                CheckAndOr();
+                return this;
+            }
+            public ConditionBuilder LessThan(Variable a, Variable b)
+            {
+                CheckVariablesAreNull(a, b);
+                a.Load(il);
+                b.Load(il);
+                il.Clt();
+                CheckAndOr();
+                return this;
+            }
+            public ConditionBuilder And()
+            {
+                and = true;
+                return this;
+            }
+            public ConditionBuilder Or()
+            {
+                or = true;
+                return this;
+            }
+            internal void EndCondition()
+            {
+                il.Stloc(condition);
+                if (conditionBlock is IfBuilder)
+                    il.Ldloc(condition);
+            }
+            void CheckVariablesAreNull(Variable a, Variable b)
+            {
+                if (a == null)
+                    throw new ArgumentNullException("Variable Cannot Be Null! (a)");
+                else if (b == null)
+                    throw new ArgumentNullException("Variable Cannot Be Null! (b)");
+            }
+            void CheckAndOr()
+            {
+                if (and)
+                {
+                    il.And();
+                    and = false;
+                }
+                else if (or)
+                {
+                    il.Or();
+                    or = false;
+                }
+            }
+            internal ConditionBuilder(ConditionBlock conditionBlock, LocalBuilder condition = null)
+            {
+                this.conditionBlock = conditionBlock;
+                il = conditionBlock.emitter;
+                this.condition = condition ?? il.DeclareLocal(typeof(bool));
+            }
+        }
+        public class IfBuilder : ConditionBlock
+        {
+            readonly ConditionBuilder conditionBuilder;
+            readonly Label label;
+            internal IfBuilder(ILEmitter emitter, Action<ConditionBuilder> builder) : base(emitter)
+            {
+                label = emitter.DefineLabel();
+                endOfBlock = label;
+                outOfBlock = label;
+                conditionBuilder = new ConditionBuilder(this);
+                Condition(builder);
+            }
+            void Condition(Action<ConditionBuilder> builder)
+            {
+                if (conditionIsSet) return;
+                builder(conditionBuilder);
+                conditionBuilder.EndCondition();
+                emitter.Brfalse(label);
+                conditionIsSet = true;
+            }
+            public void EndIf() => emitter.MarkLabel(label);
+        }
+        public class DoWhileBuilder : ConditionBlock
+        {
+            readonly ConditionBuilder conditionBuilder;
+            readonly Label label;
+            readonly LocalBuilder condition;
+            internal DoWhileBuilder(ILEmitter emitter, Action<ConditionBuilder> builder) : base(emitter)
+            {
+                label = emitter.DefineLabel();
+                endOfBlock = emitter.DefineLabel();
+                outOfBlock = emitter.DefineLabel();
+                condition = emitter.DeclareLocal(typeof(bool));
+                conditionBuilder = new ConditionBuilder(this, condition);
+                Condition(builder);
+            }
+            public void Break()
+                => emitter.Br(outOfBlock);
+            public void Continue()
+                => emitter.Br(endOfBlock);
+            void Condition(Action<ConditionBuilder> builder)
+            {
+                if (conditionIsSet) return;
+                builder(conditionBuilder);
+                conditionBuilder.EndCondition();
+                emitter.MarkLabel(label);
+                conditionIsSet = true;
+            }
+            public void EndDoWhile()
+            {
+                emitter.MarkLabel(endOfBlock);
+                emitter.Ldloc(condition);
+                emitter.Brtrue(label);
+                emitter.MarkLabel(outOfBlock);
+            }
+        }
+        public class WhileBuilder : ConditionBlock
+        {
+            readonly ConditionBuilder conditionBuilder;
+            readonly Label label;
+            readonly LocalBuilder condition;
+            Action<ConditionBuilder> builder;
+            readonly Label conditionLab;
+            internal WhileBuilder(ILEmitter emitter, Action<ConditionBuilder> builder) : base(emitter)
+            {
+                label = emitter.DefineLabel();
+                endOfBlock = emitter.DefineLabel();
+                outOfBlock = emitter.DefineLabel();
+                condition = emitter.DeclareLocal(typeof(bool));
+                conditionLab = emitter.DefineLabel();
+                conditionBuilder = new ConditionBuilder(this, condition);
+                Condition(builder);
+            }
+            public void Break()
+                => emitter.Br(outOfBlock);
+            public void Continue()
+                => emitter.Br(endOfBlock);
+            void Condition(Action<ConditionBuilder> builder)
+            {
+                if (conditionIsSet) return;
+                this.builder = builder;
+                emitter.Br(conditionLab);
+                emitter.MarkLabel(label);
+                conditionIsSet = true;
+            }
+            public void EndWhile()
+            {
+                emitter.MarkLabel(conditionLab);
+                builder(conditionBuilder);
+                conditionBuilder.EndCondition();
+                emitter.MarkLabel(endOfBlock);
+                emitter.Ldloc(condition);
+                emitter.Brtrue(label);
+                emitter.MarkLabel(outOfBlock);
+            }
+        }
+        public class ForBuilder : ConditionBlock
+        {
+            public readonly LocalBuilder count;
+            readonly Label label;
+            readonly int loopCount;
+            readonly Label conditionLab;
+            readonly LocalBuilder cond;
+            internal ForBuilder(ILEmitter emitter, int loopCount) : base(emitter)
+            {
+                this.loopCount = loopCount;
+                endOfBlock = emitter.DefineLabel();
+                outOfBlock = emitter.DefineLabel();
+                label = emitter.DefineLabel();
+                cond = emitter.DeclareLocal(typeof(bool));
+                conditionLab = emitter.DefineLabel();
+                count = emitter.DeclareLocal(typeof(int));
+                emitter.Ldc_I4_0().Stloc(count);
+                emitter.Br(conditionLab);
+                emitter.MarkLabel(label);
+            }
+            public void Continue()
+                => emitter.Br(endOfBlock);
+            public void Break()
+                => emitter.Br(outOfBlock);
+            public void EndFor()
+            {
+                emitter.MarkLabel(endOfBlock);
+                emitter.Ldloc(count);
+                emitter.Ldc_I4_1();
+                emitter.Add();
+                emitter.Stloc(count);
+                emitter.MarkLabel(conditionLab);
+                emitter.Ldloc(count);
+                emitter.Ldc_I4(loopCount);
+                emitter.Clt();
+                emitter.Stloc(cond);
+                emitter.Ldloc(cond);
+                emitter.Brtrue(label);
+                emitter.MarkLabel(outOfBlock);
+            }
+        }
+        public readonly ILGenerator il;
+        public ILEmitter(ILGenerator il) => this.il = il;
+        public IfBuilder If(Action<ConditionBuilder> condition) => new IfBuilder(this, condition);
+        public WhileBuilder While(Action<ConditionBuilder> condition) => new WhileBuilder(this, condition);
+        public DoWhileBuilder DoWhile(Action<ConditionBuilder> condition) => new DoWhileBuilder(this, condition);
+        public ForBuilder For(int loopCount) => new ForBuilder(this, loopCount);
+        #region ILEx
+        public Label DefineLabel() => il.DefineLabel();
+        public ILEmitter MarkLabel(Label label) { il.MarkLabel(label); return this; }
+        public LocalBuilder DeclareLocal(Type localType, bool pinned = false) => il.DeclareLocal(localType, pinned);
+        #endregion
+        #region NoOptions
+        public ILEmitter Nop() { il.Emit(OpCodes.Nop); return this; }
+        public ILEmitter Break() { il.Emit(OpCodes.Break); return this; }
+        public ILEmitter Ldarg_0() { il.Emit(OpCodes.Ldarg_0); return this; }
+        public ILEmitter Ldarg_1() { il.Emit(OpCodes.Ldarg_1); return this; }
+        public ILEmitter Ldarg_2() { il.Emit(OpCodes.Ldarg_2); return this; }
+        public ILEmitter Ldarg_3() { il.Emit(OpCodes.Ldarg_3); return this; }
+        public ILEmitter Ldloc_0() { il.Emit(OpCodes.Ldloc_0); return this; }
+        public ILEmitter Ldloc_1() { il.Emit(OpCodes.Ldloc_1); return this; }
+        public ILEmitter Ldloc_2() { il.Emit(OpCodes.Ldloc_2); return this; }
+        public ILEmitter Ldloc_3() { il.Emit(OpCodes.Ldloc_3); return this; }
+        public ILEmitter Stloc_0() { il.Emit(OpCodes.Stloc_0); return this; }
+        public ILEmitter Stloc_1() { il.Emit(OpCodes.Stloc_1); return this; }
+        public ILEmitter Stloc_2() { il.Emit(OpCodes.Stloc_2); return this; }
+        public ILEmitter Stloc_3() { il.Emit(OpCodes.Stloc_3); return this; }
+        public ILEmitter Ldnull() { il.Emit(OpCodes.Ldnull); return this; }
+        public ILEmitter Ldc_I4_M1() { il.Emit(OpCodes.Ldc_I4_M1); return this; }
+        public ILEmitter Ldc_I4_0() { il.Emit(OpCodes.Ldc_I4_0); return this; }
+        public ILEmitter Ldc_I4_1() { il.Emit(OpCodes.Ldc_I4_1); return this; }
+        public ILEmitter Ldc_I4_2() { il.Emit(OpCodes.Ldc_I4_2); return this; }
+        public ILEmitter Ldc_I4_3() { il.Emit(OpCodes.Ldc_I4_3); return this; }
+        public ILEmitter Ldc_I4_4() { il.Emit(OpCodes.Ldc_I4_4); return this; }
+        public ILEmitter Ldc_I4_5() { il.Emit(OpCodes.Ldc_I4_5); return this; }
+        public ILEmitter Ldc_I4_6() { il.Emit(OpCodes.Ldc_I4_6); return this; }
+        public ILEmitter Ldc_I4_7() { il.Emit(OpCodes.Ldc_I4_7); return this; }
+        public ILEmitter Ldc_I4_8() { il.Emit(OpCodes.Ldc_I4_8); return this; }
+        public ILEmitter Dup() { il.Emit(OpCodes.Dup); return this; }
+        public ILEmitter Pop() { il.Emit(OpCodes.Pop); return this; }
+        public ILEmitter Ret() { il.Emit(OpCodes.Ret); return this; }
+        public ILEmitter Ldind_I1() { il.Emit(OpCodes.Ldind_I1); return this; }
+        public ILEmitter Ldind_U1() { il.Emit(OpCodes.Ldind_U1); return this; }
+        public ILEmitter Ldind_I2() { il.Emit(OpCodes.Ldind_I2); return this; }
+        public ILEmitter Ldind_U2() { il.Emit(OpCodes.Ldind_U2); return this; }
+        public ILEmitter Ldind_I4() { il.Emit(OpCodes.Ldind_I4); return this; }
+        public ILEmitter Ldind_U4() { il.Emit(OpCodes.Ldind_U4); return this; }
+        public ILEmitter Ldind_I8() { il.Emit(OpCodes.Ldind_I8); return this; }
+        public ILEmitter Ldind_I() { il.Emit(OpCodes.Ldind_I); return this; }
+        public ILEmitter Ldind_R4() { il.Emit(OpCodes.Ldind_R4); return this; }
+        public ILEmitter Ldind_R8() { il.Emit(OpCodes.Ldind_R8); return this; }
+        public ILEmitter Ldind_Ref() { il.Emit(OpCodes.Ldind_Ref); return this; }
+        public ILEmitter Stind_Ref() { il.Emit(OpCodes.Stind_Ref); return this; }
+        public ILEmitter Stind_I1() { il.Emit(OpCodes.Stind_I1); return this; }
+        public ILEmitter Stind_I2() { il.Emit(OpCodes.Stind_I2); return this; }
+        public ILEmitter Stind_I4() { il.Emit(OpCodes.Stind_I4); return this; }
+        public ILEmitter Stind_I8() { il.Emit(OpCodes.Stind_I8); return this; }
+        public ILEmitter Stind_R4() { il.Emit(OpCodes.Stind_R4); return this; }
+        public ILEmitter Stind_R8() { il.Emit(OpCodes.Stind_R8); return this; }
+        public ILEmitter Add() { il.Emit(OpCodes.Add); return this; }
+        public ILEmitter Sub() { il.Emit(OpCodes.Sub); return this; }
+        public ILEmitter Mul() { il.Emit(OpCodes.Mul); return this; }
+        public ILEmitter Div() { il.Emit(OpCodes.Div); return this; }
+        public ILEmitter Div_Un() { il.Emit(OpCodes.Div_Un); return this; }
+        public ILEmitter Rem() { il.Emit(OpCodes.Rem); return this; }
+        public ILEmitter Rem_Un() { il.Emit(OpCodes.Rem_Un); return this; }
+        public ILEmitter And() { il.Emit(OpCodes.And); return this; }
+        public ILEmitter Or() { il.Emit(OpCodes.Or); return this; }
+        public ILEmitter Xor() { il.Emit(OpCodes.Xor); return this; }
+        public ILEmitter Shl() { il.Emit(OpCodes.Shl); return this; }
+        public ILEmitter Shr() { il.Emit(OpCodes.Shr); return this; }
+        public ILEmitter Shr_Un() { il.Emit(OpCodes.Shr_Un); return this; }
+        public ILEmitter Neg() { il.Emit(OpCodes.Neg); return this; }
+        public ILEmitter Not() { il.Emit(OpCodes.Not); return this; }
+        public ILEmitter Conv_I1() { il.Emit(OpCodes.Conv_I1); return this; }
+        public ILEmitter Conv_I2() { il.Emit(OpCodes.Conv_I2); return this; }
+        public ILEmitter Conv_I4() { il.Emit(OpCodes.Conv_I4); return this; }
+        public ILEmitter Conv_I8() { il.Emit(OpCodes.Conv_I8); return this; }
+        public ILEmitter Conv_R4() { il.Emit(OpCodes.Conv_R4); return this; }
+        public ILEmitter Conv_R8() { il.Emit(OpCodes.Conv_R8); return this; }
+        public ILEmitter Conv_U4() { il.Emit(OpCodes.Conv_U4); return this; }
+        public ILEmitter Conv_U8() { il.Emit(OpCodes.Conv_U8); return this; }
+        public ILEmitter Conv_R_Un() { il.Emit(OpCodes.Conv_R_Un); return this; }
+        public ILEmitter Throw() { il.Emit(OpCodes.Throw); return this; }
+        public ILEmitter Conv_Ovf_I1_Un() { il.Emit(OpCodes.Conv_Ovf_I1_Un); return this; }
+        public ILEmitter Conv_Ovf_I2_Un() { il.Emit(OpCodes.Conv_Ovf_I2_Un); return this; }
+        public ILEmitter Conv_Ovf_I4_Un() { il.Emit(OpCodes.Conv_Ovf_I4_Un); return this; }
+        public ILEmitter Conv_Ovf_I8_Un() { il.Emit(OpCodes.Conv_Ovf_I8_Un); return this; }
+        public ILEmitter Conv_Ovf_U1_Un() { il.Emit(OpCodes.Conv_Ovf_U1_Un); return this; }
+        public ILEmitter Conv_Ovf_U2_Un() { il.Emit(OpCodes.Conv_Ovf_U2_Un); return this; }
+        public ILEmitter Conv_Ovf_U4_Un() { il.Emit(OpCodes.Conv_Ovf_U4_Un); return this; }
+        public ILEmitter Conv_Ovf_U8_Un() { il.Emit(OpCodes.Conv_Ovf_U8_Un); return this; }
+        public ILEmitter Conv_Ovf_I_Un() { il.Emit(OpCodes.Conv_Ovf_I_Un); return this; }
+        public ILEmitter Conv_Ovf_U_Un() { il.Emit(OpCodes.Conv_Ovf_U_Un); return this; }
+        public ILEmitter Ldlen() { il.Emit(OpCodes.Ldlen); return this; }
+        public ILEmitter Ldelem_I1() { il.Emit(OpCodes.Ldelem_I1); return this; }
+        public ILEmitter Ldelem_U1() { il.Emit(OpCodes.Ldelem_U1); return this; }
+        public ILEmitter Ldelem_I2() { il.Emit(OpCodes.Ldelem_I2); return this; }
+        public ILEmitter Ldelem_U2() { il.Emit(OpCodes.Ldelem_U2); return this; }
+        public ILEmitter Ldelem_I4() { il.Emit(OpCodes.Ldelem_I4); return this; }
+        public ILEmitter Ldelem_U4() { il.Emit(OpCodes.Ldelem_U4); return this; }
+        public ILEmitter Ldelem_I8() { il.Emit(OpCodes.Ldelem_I8); return this; }
+        public ILEmitter Ldelem_I() { il.Emit(OpCodes.Ldelem_I); return this; }
+        public ILEmitter Ldelem_R4() { il.Emit(OpCodes.Ldelem_R4); return this; }
+        public ILEmitter Ldelem_R8() { il.Emit(OpCodes.Ldelem_R8); return this; }
+        public ILEmitter Ldelem_Ref() { il.Emit(OpCodes.Ldelem_Ref); return this; }
+        public ILEmitter Stelem_I() { il.Emit(OpCodes.Stelem_I); return this; }
+        public ILEmitter Stelem_I1() { il.Emit(OpCodes.Stelem_I1); return this; }
+        public ILEmitter Stelem_I2() { il.Emit(OpCodes.Stelem_I2); return this; }
+        public ILEmitter Stelem_I4() { il.Emit(OpCodes.Stelem_I4); return this; }
+        public ILEmitter Stelem_I8() { il.Emit(OpCodes.Stelem_I8); return this; }
+        public ILEmitter Stelem_R4() { il.Emit(OpCodes.Stelem_R4); return this; }
+        public ILEmitter Stelem_R8() { il.Emit(OpCodes.Stelem_R8); return this; }
+        public ILEmitter Stelem_Ref() { il.Emit(OpCodes.Stelem_Ref); return this; }
+        public ILEmitter Conv_Ovf_I1() { il.Emit(OpCodes.Conv_Ovf_I1); return this; }
+        public ILEmitter Conv_Ovf_U1() { il.Emit(OpCodes.Conv_Ovf_U1); return this; }
+        public ILEmitter Conv_Ovf_I2() { il.Emit(OpCodes.Conv_Ovf_I2); return this; }
+        public ILEmitter Conv_Ovf_U2() { il.Emit(OpCodes.Conv_Ovf_U2); return this; }
+        public ILEmitter Conv_Ovf_I4() { il.Emit(OpCodes.Conv_Ovf_I4); return this; }
+        public ILEmitter Conv_Ovf_U4() { il.Emit(OpCodes.Conv_Ovf_U4); return this; }
+        public ILEmitter Conv_Ovf_I8() { il.Emit(OpCodes.Conv_Ovf_I8); return this; }
+        public ILEmitter Conv_Ovf_U8() { il.Emit(OpCodes.Conv_Ovf_U8); return this; }
+        public ILEmitter Ckfinite() { il.Emit(OpCodes.Ckfinite); return this; }
+        public ILEmitter Conv_U2() { il.Emit(OpCodes.Conv_U2); return this; }
+        public ILEmitter Conv_U1() { il.Emit(OpCodes.Conv_U1); return this; }
+        public ILEmitter Conv_I() { il.Emit(OpCodes.Conv_I); return this; }
+        public ILEmitter Conv_Ovf_I() { il.Emit(OpCodes.Conv_Ovf_I); return this; }
+        public ILEmitter Conv_Ovf_U() { il.Emit(OpCodes.Conv_Ovf_U); return this; }
+        public ILEmitter Add_Ovf() { il.Emit(OpCodes.Add_Ovf); return this; }
+        public ILEmitter Add_Ovf_Un() { il.Emit(OpCodes.Add_Ovf_Un); return this; }
+        public ILEmitter Mul_Ovf() { il.Emit(OpCodes.Mul_Ovf); return this; }
+        public ILEmitter Mul_Ovf_Un() { il.Emit(OpCodes.Mul_Ovf_Un); return this; }
+        public ILEmitter Sub_Ovf() { il.Emit(OpCodes.Sub_Ovf); return this; }
+        public ILEmitter Sub_Ovf_Un() { il.Emit(OpCodes.Sub_Ovf_Un); return this; }
+        public ILEmitter Endfinally() { il.Emit(OpCodes.Endfinally); return this; }
+        public ILEmitter Stind_I() { il.Emit(OpCodes.Stind_I); return this; }
+        public ILEmitter Conv_U() { il.Emit(OpCodes.Conv_U); return this; }
+        public ILEmitter Prefix7() { il.Emit(OpCodes.Prefix7); return this; }
+        public ILEmitter Prefix6() { il.Emit(OpCodes.Prefix6); return this; }
+        public ILEmitter Prefix5() { il.Emit(OpCodes.Prefix5); return this; }
+        public ILEmitter Prefix4() { il.Emit(OpCodes.Prefix4); return this; }
+        public ILEmitter Prefix3() { il.Emit(OpCodes.Prefix3); return this; }
+        public ILEmitter Prefix2() { il.Emit(OpCodes.Prefix2); return this; }
+        public ILEmitter Prefix1() { il.Emit(OpCodes.Prefix1); return this; }
+        public ILEmitter Prefixref() { il.Emit(OpCodes.Prefixref); return this; }
+        public ILEmitter Arglist() { il.Emit(OpCodes.Arglist); return this; }
+        public ILEmitter Ceq() { il.Emit(OpCodes.Ceq); return this; }
+        public ILEmitter Cgt() { il.Emit(OpCodes.Cgt); return this; }
+        public ILEmitter Cgt_Un() { il.Emit(OpCodes.Cgt_Un); return this; }
+        public ILEmitter Clt() { il.Emit(OpCodes.Clt); return this; }
+        public ILEmitter Clt_Un() { il.Emit(OpCodes.Clt_Un); return this; }
+        public ILEmitter Localloc() { il.Emit(OpCodes.Localloc); return this; }
+        public ILEmitter Endfilter() { il.Emit(OpCodes.Endfilter); return this; }
+        public ILEmitter Volatile() { il.Emit(OpCodes.Volatile); return this; }
+        public ILEmitter Tailcall() { il.Emit(OpCodes.Tailcall); return this; }
+        public ILEmitter Cpblk() { il.Emit(OpCodes.Cpblk); return this; }
+        public ILEmitter Initblk() { il.Emit(OpCodes.Initblk); return this; }
+        public ILEmitter Rethrow() { il.Emit(OpCodes.Rethrow); return this; }
+        public ILEmitter Refanytype() { il.Emit(OpCodes.Refanytype); return this; }
+        public ILEmitter Readonly() { il.Emit(OpCodes.Readonly); return this; }
+        #endregion
+        #region Options
+        public ILEmitter Ldarg_S(byte index) { il.Emit(OpCodes.Ldarg_S, index); return this; }
+        public ILEmitter Ldarga_S(byte index) { il.Emit(OpCodes.Ldarga_S, index); return this; }
+        public ILEmitter Starg_S(byte index) { il.Emit(OpCodes.Starg_S, index); return this; }
+        public ILEmitter Ldloc_S(LocalBuilder local) { il.Emit(OpCodes.Ldloc_S, local); return this; }
+        public ILEmitter Ldloc_S(byte index) { il.Emit(OpCodes.Ldloc_S, index); return this; }
+        public ILEmitter Ldloca_S(byte index) { il.Emit(OpCodes.Ldloca_S, index); return this; }
+        public ILEmitter Stloc_S(LocalBuilder local) { il.Emit(OpCodes.Stloc_S, local); return this; }
+        public ILEmitter Stloc_S(byte index) { il.Emit(OpCodes.Stloc_S, index); return this; }
+        public ILEmitter Ldc_I4_S(sbyte value) { il.Emit(OpCodes.Ldc_I4_S, value); return this; }
+        public ILEmitter Ldc_I4(int value) { il.Emit(OpCodes.Ldc_I4, value); return this; }
+        public ILEmitter Ldc_I8(long value) { il.Emit(OpCodes.Ldc_I8, value); return this; }
+        public ILEmitter Ldc_R4(float value) { il.Emit(OpCodes.Ldc_R4, value); return this; }
+        public ILEmitter Ldc_R8(double value) { il.Emit(OpCodes.Ldc_R8, value); return this; }
+        public ILEmitter Jmp(MethodInfo method) { il.Emit(OpCodes.Jmp, method); return this; }
+        public ILEmitter Call(MethodInfo method) { il.Emit(OpCodes.Call, method); return this; }
+        public ILEmitter Call(ConstructorInfo constructor) { il.Emit(OpCodes.Call, constructor); return this; }
+        public ILEmitter Call(MethodInfo method, Type[] types) { il.EmitCall(OpCodes.Call, method, types); return this; }
+        public ILEmitter Calli(CallingConventions callingConventions, Type returnType, Type[] parameterTypes, Type[] optionalParameterTypes) { il.EmitCalli(OpCodes.Calli, callingConventions, returnType, parameterTypes, optionalParameterTypes); return this; }
+        public ILEmitter Calli(CallingConvention callingConvention, Type returnType, Type[] parameterTypes) { il.EmitCalli(OpCodes.Calli, callingConvention, returnType, parameterTypes); return this; }
+        public ILEmitter Br_S(Label label) { il.Emit(OpCodes.Br_S, label); return this; }
+        public ILEmitter Brfalse_S(Label label) { il.Emit(OpCodes.Brfalse_S, label); return this; }
+        public ILEmitter Brtrue_S(Label label) { il.Emit(OpCodes.Brtrue_S, label); return this; }
+        public ILEmitter Beq_S(Label label) { il.Emit(OpCodes.Beq_S, label); return this; }
+        public ILEmitter Bge_S(Label label) { il.Emit(OpCodes.Bge_S, label); return this; }
+        public ILEmitter Bgt_S(Label label) { il.Emit(OpCodes.Bgt_S, label); return this; }
+        public ILEmitter Ble_S(Label label) { il.Emit(OpCodes.Ble_S, label); return this; }
+        public ILEmitter Blt_S(Label label) { il.Emit(OpCodes.Blt_S, label); return this; }
+        public ILEmitter Bne_Un_S(Label label) { il.Emit(OpCodes.Bne_Un_S, label); return this; }
+        public ILEmitter Bge_Un_S(Label label) { il.Emit(OpCodes.Bge_Un_S, label); return this; }
+        public ILEmitter Bgt_Un_S(Label label) { il.Emit(OpCodes.Bgt_Un_S, label); return this; }
+        public ILEmitter Ble_Un_S(Label label) { il.Emit(OpCodes.Ble_Un_S, label); return this; }
+        public ILEmitter Blt_Un_S(Label label) { il.Emit(OpCodes.Blt_Un_S, label); return this; }
+        public ILEmitter Br(Label label) { il.Emit(OpCodes.Br, label); return this; }
+        public ILEmitter Brfalse(Label label) { il.Emit(OpCodes.Brfalse, label); return this; }
+        public ILEmitter Brtrue(Label label) { il.Emit(OpCodes.Brtrue, label); return this; }
+        public ILEmitter Beq(Label label) { il.Emit(OpCodes.Beq, label); return this; }
+        public ILEmitter Bge(Label label) { il.Emit(OpCodes.Bge, label); return this; }
+        public ILEmitter Bgt(Label label) { il.Emit(OpCodes.Bgt, label); return this; }
+        public ILEmitter Ble(Label label) { il.Emit(OpCodes.Ble, label); return this; }
+        public ILEmitter Blt(Label label) { il.Emit(OpCodes.Blt, label); return this; }
+        public ILEmitter Bne_Un(Label label) { il.Emit(OpCodes.Bne_Un, label); return this; }
+        public ILEmitter Bge_Un(Label label) { il.Emit(OpCodes.Bge_Un, label); return this; }
+        public ILEmitter Bgt_Un(Label label) { il.Emit(OpCodes.Bgt_Un, label); return this; }
+        public ILEmitter Ble_Un(Label label) { il.Emit(OpCodes.Ble_Un, label); return this; }
+        public ILEmitter Blt_Un(Label label) { il.Emit(OpCodes.Blt_Un, label); return this; }
+        public ILEmitter Switch(Label[] labels) { il.Emit(OpCodes.Switch, labels); return this; }
+        public ILEmitter Callvirt(MethodInfo method) { il.Emit(OpCodes.Callvirt, method); return this; }
+        public ILEmitter Callvirt(MethodInfo method, Type[] types) { il.EmitCall(OpCodes.Callvirt, method, types); return this; }
+        public ILEmitter Cpobj(Type type) { il.Emit(OpCodes.Cpobj, type); return this; }
+        public ILEmitter Ldobj(Type type) { il.Emit(OpCodes.Ldobj, type); return this; }
+        public ILEmitter Ldstr(string value) { il.Emit(OpCodes.Ldstr, value); return this; }
+        public ILEmitter Newobj(ConstructorInfo constructor) { il.Emit(OpCodes.Newobj, constructor); return this; }
+        public ILEmitter Castclass(Type type) { il.Emit(OpCodes.Castclass, type); return this; }
+        public ILEmitter Isinst(Type type) { il.Emit(OpCodes.Isinst, type); return this; }
+        public ILEmitter Unbox(Type type) { il.Emit(OpCodes.Unbox, type); return this; }
+        public ILEmitter Ldfld(FieldInfo field) { il.Emit(OpCodes.Ldfld, field); return this; }
+        public ILEmitter Ldflda(FieldInfo field) { il.Emit(OpCodes.Ldflda, field); return this; }
+        public ILEmitter Stfld(FieldInfo field) { il.Emit(OpCodes.Stfld, field); return this; }
+        public ILEmitter Ldsfld(FieldInfo field) { il.Emit(OpCodes.Ldsfld, field); return this; }
+        public ILEmitter Ldsflda(FieldInfo field) { il.Emit(OpCodes.Ldsflda, field); return this; }
+        public ILEmitter Stsfld(FieldInfo field) { il.Emit(OpCodes.Stsfld, field); return this; }
+        public ILEmitter Stobj(Type type) { il.Emit(OpCodes.Stobj, type); return this; }
+        public ILEmitter Box(Type type) { il.Emit(OpCodes.Box, type); return this; }
+        public ILEmitter Newarr(Type type) { il.Emit(OpCodes.Newarr, type); return this; }
+        public ILEmitter Ldelema(Type type) { il.Emit(OpCodes.Ldelema, type); return this; }
+        public ILEmitter Ldelem(Type type) { il.Emit(OpCodes.Ldelem, type); return this; }
+        public ILEmitter Stelem(Type type) { il.Emit(OpCodes.Stelem, type); return this; }
+        public ILEmitter Unbox_Any(Type type) { il.Emit(OpCodes.Unbox_Any, type); return this; }
+        public ILEmitter Refanyval(Type type) { il.Emit(OpCodes.Refanyval, type); return this; }
+        public ILEmitter Mkrefany(Type type) { il.Emit(OpCodes.Mkrefany, type); return this; }
+        public ILEmitter Ldtoken(MethodInfo method) { il.Emit(OpCodes.Ldtoken, method); return this; }
+        public ILEmitter Ldtoken(FieldInfo field) { il.Emit(OpCodes.Ldtoken, field); return this; }
+        public ILEmitter Ldtoken(Type type) { il.Emit(OpCodes.Ldtoken, type); return this; }
+        public ILEmitter Leave(Label label) { il.Emit(OpCodes.Leave, label); return this; }
+        public ILEmitter Leave_S(Label label) { il.Emit(OpCodes.Leave_S, label); return this; }
+        public ILEmitter Ldftn(MethodInfo method) { il.Emit(OpCodes.Ldftn, method); return this; }
+        public ILEmitter Ldvirtftn(MethodInfo method) { il.Emit(OpCodes.Ldvirtftn, method); return this; }
+        public ILEmitter Ldarg(short index) { il.Emit(OpCodes.Ldarg, index); return this; }
+        public ILEmitter Ldarga(short index) { il.Emit(OpCodes.Ldarga, index); return this; }
+        public ILEmitter Starg(short index) { il.Emit(OpCodes.Starg, index); return this; }
+        public ILEmitter Ldloc(short index) { il.Emit(OpCodes.Ldloc, index); return this; }
+        public ILEmitter Ldloc(LocalBuilder local) { il.Emit(OpCodes.Ldloc, local); return this; }
+        public ILEmitter Ldloca(short index) { il.Emit(OpCodes.Ldloca, index); return this; }
+        public ILEmitter Stloc(LocalBuilder local) { il.Emit(OpCodes.Stloc, local); return this; }
+        public ILEmitter Stloc(short index) { il.Emit(OpCodes.Stloc, index); return this; }
+        public ILEmitter Unaligned(Label label) { il.Emit(OpCodes.Unaligned, label); return this; }
+        public ILEmitter Unaligned(byte index) { il.Emit(OpCodes.Unaligned, index); return this; }
+        public ILEmitter Initobj(Type type) { il.Emit(OpCodes.Initobj, type); return this; }
+        public ILEmitter Constrained(Type type) { il.Emit(OpCodes.Constrained, type); return this; }
+        public ILEmitter Sizeof(Type type) { il.Emit(OpCodes.Sizeof, type); return this; }
+        #endregion
+    }
     public class Class
     {
         Class(Type type)
@@ -89,21 +627,7 @@ namespace System
     public class Method
     {
         #region Method
-        public static AssemblyBuilder Asm;
-        public static ModuleBuilder Mod;
-        static Method()
-        {
-            if (Type.GetType("Mono.Runtime") != null)
-            {
-                Asm = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("Asm"), AssemblyBuilderAccess.Run);
-                Mod = Asm.DefineDynamicModule("Asm");
-            }
-            else
-            {
-                Asm = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("Asm"), AssemblyBuilderAccess.RunAndSave);
-                Mod = Asm.DefineDynamicModule("Asm", "Asm.dll", true);
-            }
-        }
+        static readonly FieldInfo paramTypes = typeof(DynamicMethod).GetField("m_parameterTypes", All);
         Method(MethodBase method)
         {
             Base = method;
@@ -124,12 +648,12 @@ namespace System
             var dT = Base.DeclaringType;
             var n = Base.Name;
             var ps = Base.GetParameters();
-            TypeBuilder t = Mod.DefineType($"{dT}_{n}_Copier", TypeAttributes.Public);
             var retType = Base is MethodInfo meth ? meth.ReturnType : typeof(void);
             var mName = $"{dT}_{n}_Copy";
-            MethodBuilder m = t.DefineMethod(mName, MethodAttributes.Public | MethodAttributes.Static, retType, ps.Select(p => p.ParameterType).ToArray());
+            DynamicMethod m = new DynamicMethod(mName, retType, ps.Select(p => p.ParameterType).ToArray(), true);
             Copy(m.GetILGenerator());
-            return t.CreateType().GetMethod(mName);
+            Utils.Compile(m);
+            return m;
         }
         public void AddPrefix(MethodInfo prefix)
         {
@@ -159,25 +683,21 @@ namespace System
         }
         public void Copy(ILGenerator il)
             => Editor.Copy(il);
-        public static void SaveAsm()
-            => Asm.Save("Asm.dll");
         public object Invoke(object instance, params object[] parameters) => Base.Invoke(instance, parameters);
         public MethodInfo Implement(Action<ILGenerator> ilGen)
         {
             if (IsImplemented)
                 throw new InvalidOperationException("Can Only Implement At The First Time!");
-            TypeBuilder t = Mod.DefineType($"{Base.Name}_Implement");
-            MethodBuilder m = t.DefineMethod("Implement", MethodAttributes.Public | MethodAttributes.Static, ReturnType, ParameterTypes);
+            DynamicMethod m = new DynamicMethod("Implement", ReturnType, ParameterTypes, true);
             if (!Base.IsStatic)
             {
-                m.SetParameters(ParameterTypes.Prepend(Base.DeclaringType.MakeByRefType()).ToArray());
+                paramTypes.SetValue(m, ParameterTypes.Prepend(Base.DeclaringType.MakeByRefType()).ToArray());
                 m.DefineParameter(1, ParameterAttributes.None, "this");
             }
             ilGen(m.GetILGenerator());
-            var result = t.CreateType().GetMethod("Implement");
-            Replace(Base, result);
+            Replace(Base, Utils.Compile(m));
             IsImplemented = true;
-            return result;
+            return m;
         }
         public string GetInstructions()
         {
@@ -187,6 +707,8 @@ namespace System
             return str.ToString();
         }
         public static void Replace(MethodBase target, MethodBase method)
+            => Utils.Replace(target, method);
+        public static void Replace(MethodBase target, IntPtr method)
             => Utils.Replace(target, method);
         public static void Recover(MethodBase target)
             => Utils.Recover(target);
@@ -588,23 +1110,22 @@ namespace System
                             return;
                     }
             }
-            private MethodInfo MakeFixedMethod(FixOption option)
+            private IntPtr MakeFixedMethod(FixOption option)
             {
                 option = option ?? FixOption.Default;
                 var orig = Reader.Method;
                 var retType = orig is MethodInfo m ? m.ReturnType : typeof(void);
                 var parameters = orig.GetParameters();
                 var paramTypes = parameters.Select(p => p.ParameterType).ToList();
-                var t = Mod.DefineType($"Fixer{FixedMethodCount++}");
                 var offset = 0;
-                var method = t.DefineMethod("Fix", MethodAttributes.Public | MethodAttributes.Static, retType, paramTypes.ToArray());
+                var method = new DynamicMethod($"Fix{(FixedMethodCount++ != 0 ? FixedMethodCount.ToString() : "")}", retType, paramTypes.ToArray(), true);
                 var decType = orig.DeclaringType;
                 if (!orig.IsStatic)
                 {
                     if (IsStruct(decType))
                         paramTypes.Insert(offset++, decType.MakeByRefType());
                     else paramTypes.Insert(offset++, decType);
-                    method.SetParameters(paramTypes.ToArray());
+                    Method.paramTypes.SetValue(method, paramTypes.ToArray());
                     method.DefineParameter(1, ParameterAttributes.None, "__instance");
                 }
                 var il = method.GetILGenerator();
@@ -624,7 +1145,6 @@ namespace System
                 var locVars = body.LocalVariables;
                 var locCount = locVars.Count;
                 var fixes = prefixes.Union(postfixes);
-                var argumentArray = default(LocalBuilder);
                 for (int i = 0; i < parameters.Length; i++)
                 {
                     var param = parameters[i];
@@ -634,7 +1154,7 @@ namespace System
                 }
                 BodyReader.PrepareLabels(il, instructions, i => i.OpCode != OpCodes.Ret);
                 BodyReader.PrepareLocals(il, locVars);
-                PrepareArgumentArray(il, orig, parameters, fixes, option, out argumentArray);
+                PrepareArgumentArray(il, orig, parameters, fixes, option, out LocalBuilder argumentArray);
                 prefixes.ForEach(fix => EmitFix(orig, fix, il, retLoc, skipOrig, argumentArray, option));
                 if (canSkip)
                 {
@@ -677,7 +1197,7 @@ namespace System
                 if (hasReturn)
                     il.Emit(OpCodes.Ldloc, retLoc);
                 il.Emit(OpCodes.Ret);
-                return t.CreateType().GetMethod("Fix");
+                return Utils.Compile(method);
             }
             private void EmitFix(MethodBase orig, MethodInfo fix, ILGenerator il, LocalBuilder retLoc, LocalBuilder skipOrig, LocalBuilder argumentArray, FixOption option = null)
             {
@@ -702,7 +1222,8 @@ namespace System
                     {
                         if (paramType.IsByRef)
                             il.Emit(OpCodes.Ldarga, index);
-                        else il.Emit(OpCodes.Ldarg, index);
+                        else
+                            il.Emit(OpCodes.Ldarg, index);
                     }
                     else if (name == option.Instance)
                     {
@@ -778,10 +1299,16 @@ namespace System
                 void BoxIfNeeded(Type origType, Type fixType)
                 {
                     if (origType != fixType && fixType.IsAssignableFrom(origType))
-                        il.Emit(OpCodes.Box, fixType);
+                    {
+                        if (origType.IsClass)
+                            il.Emit(OpCodes.Castclass, fixType);
+                        else il.Emit(OpCodes.Box, fixType);
+                    }
                 }
             }
             public bool Attached;
+            static readonly AssemblyBuilder delWrapper = AssemblyBuilder.DefineDynamicAssembly(new AssemblyName("delWrapper"), AssemblyBuilderAccess.Run);
+            static readonly ModuleBuilder mod = delWrapper.DefineDynamicModule("delWrapper");
             public static MethodInfo MakeStaticWrapper(Delegate del)
             {
                 var delType = del.GetType();
@@ -790,7 +1317,7 @@ namespace System
                 var parameters = method.GetParameters();
                 var paramTypes = parameters.Select(p => p.ParameterType).ToArray();
                 var returnType = invoke.ReturnType;
-                var t = Mod.DefineType($"StaticWrapper{WrapperCount++}");
+                var t = mod.DefineType($"StaticWrapper{WrapperCount++}");
                 var fld = t.DefineField("del", delType, FieldAttributes.Public | FieldAttributes.Static);
                 var dm = t.DefineMethod("Wrapper", MethodAttributes.Public | MethodAttributes.Static, returnType, paramTypes);
                 for (int i = 0; i < parameters.Length; i++)
@@ -1214,6 +1741,65 @@ namespace System
         }
         public static class Utils
         {
+            public static IntPtr Compile(DynamicMethod dynMethod)
+            {
+                MethodInfo m_compileMeth = typeof(RuntimeHelpers).GetMethod("_CompileMethod", (BindingFlags)15420);
+                Type t = dynMethod.GetType();
+                MethodInfo mi = t.GetMethod("CreateDynMethod", (BindingFlags)15420);
+                if (mi != null)
+                {
+                    mi.Invoke(dynMethod, null);
+                    return ((RuntimeMethodHandle)t.GetField("mhandle", (BindingFlags)15420).GetValue(dynMethod)).GetFunctionPointer();
+                }
+                RuntimeMethodHandle handle;
+                FieldInfo fi;
+                mi = t.GetMethod("GetMethodDescriptor", (BindingFlags)15420);
+                if (mi != null)
+                    handle = (RuntimeMethodHandle)mi.Invoke(dynMethod, null);
+                else
+                {
+                    fi = t.GetField("m_method", (BindingFlags)15420);
+                    handle =
+                        fi != null
+                        ? (RuntimeMethodHandle)fi.GetValue(dynMethod)
+                        : default;
+                }
+                t = handle.GetType();
+                object result;
+                fi = t.GetField("m_value", (BindingFlags)15420);
+                if (fi != null)
+                    result = fi.GetValue(handle);
+                else
+                {
+                    fi = t.GetField("Value", (BindingFlags)15420);
+                    if (fi != null)
+                        result = fi.GetValue(handle);
+                    else
+                    {
+                        mi = t.GetMethod("GetMethodInfo", (BindingFlags)15420);
+                        if (mi != null)
+                            result = mi.Invoke(handle, null);
+                        else
+                            result = null;
+                    }
+                }
+                if (result != null)
+                    try
+                    {
+                        m_compileMeth.Invoke(null, new object[1] { result });
+                        return handle.GetFunctionPointer();
+                    }
+                    catch { }
+                ParameterInfo p = m_compileMeth.GetParameters()[0];
+                if (p.ParameterType.IsAssignableFrom(typeof(IntPtr)))
+                {
+                    m_compileMeth.Invoke(null, new object[1] { handle.Value });
+                    return handle.GetFunctionPointer();
+                }
+                if (p.ParameterType.IsAssignableFrom(t))
+                    m_compileMeth.Invoke(null, new object[1] { handle });
+                return handle.GetFunctionPointer();
+            }
             static readonly Dictionary<MethodBase, List<ushort>> Cache = new Dictionary<MethodBase, List<ushort>>();
             public static unsafe void TryNoInlining(MethodBase method)
             {
