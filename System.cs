@@ -654,8 +654,8 @@ namespace System
         static Method()
         {
             if (Type.GetType("Mono.Runtime") != null)
-                paramTypes = typeof(DynamicMethod).GetField("m_parameterTypes", All);
-            else paramTypes = typeof(DynamicMethod).GetField("parameters", All);
+                paramTypes = typeof(DynamicMethod).GetField("parameters", All);
+            else paramTypes = typeof(DynamicMethod).GetField("m_parameterTypes", All);
         }
         static readonly FieldInfo paramTypes;
         Method(MethodBase method)
