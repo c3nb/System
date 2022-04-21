@@ -651,7 +651,13 @@ namespace System
     public class Method
     {
         #region Method
-        static readonly FieldInfo paramTypes = typeof(DynamicMethod).GetField("m_parameterTypes", All);
+        static Method()
+        {
+            if (Type.GetType("Mono.Runtime") != null)
+                paramTypes = typeof(DynamicMethod).GetField("m_parameterTypes", All);
+            else paramTypes = typeof(DynamicMethod).GetField("parameters", All);
+        }
+        static readonly FieldInfo paramTypes;
         Method(MethodBase method)
         {
             Base = method;
