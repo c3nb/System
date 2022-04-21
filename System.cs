@@ -705,6 +705,10 @@ namespace System
             Editor.UpdateWrapper();
             return ret;
         }
+        public void RemovePrefix(MethodInfo prefix)
+            => Editor.RemovePrefix(prefix);
+        public void RemovePostfix(MethodInfo postfix)
+            => Editor.RemovePostfix(postfix);
         public void Copy(ILGenerator il)
             => Editor.Copy(il);
         public object Invoke(object instance, params object[] parameters) => Base.Invoke(instance, parameters);
